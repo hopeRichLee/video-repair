@@ -1,0 +1,9 @@
+node_modules/
+.playwright-cli/
+dist/
+dist-electron/
+release/
+coverage/
+output/
+vendor/untrunc/
+*.log
