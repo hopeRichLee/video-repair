@@ -52,12 +52,66 @@ export interface RepairProgress {
   message: string
   logLine?: string
   diagnosis?: Diagnosis
+  recoveryAttempt?: {
+    index: number
+    total: number
+    label: string
+  }
+}
+
+export type RecoveryCodec = 'h264' | 'hevc'
+
+export interface RecoveryHints {
+  codec?: RecoveryCodec
+  width?: 1280 | 1920 | 3840
+  height?: 720 | 1080 | 2160
+  frameRate?: 30 | 60
 }
 
 export interface StartRepairRequest {
   inputPath: string
   referencePath?: string
   experimentalRecovery?: boolean
+  recoveryHints?: RecoveryHints
+}
+
+export interface PreflightRepairRequest {
+  inputPath: string
+  referencePath?: string
+}
+
+export interface RepairPreflight {
+  inputPath: string
+  fileName: string
+  fileSizeBytes: number
+  modifiedAt: string
+  diagnosis: Diagnosis
+  diskSpace: {
+    availableBytes: number
+    requiredBytes: number
+    sufficient: boolean
+  }
+  recommendedStrategy: 'remux' | 'index-rebuild' | 'unavailable'
+  strategyReason: string
+  canStart: boolean
+  reference?: {
+    path: string
+    compatible: boolean
+    reason?: string
+    diagnosis?: Diagnosis
+  }
+}
+
+export interface RepairVerification {
+  status: 'passed' | 'warning'
+  outputSizeBytes: number
+  durationSeconds: number
+  decodedFrames: number
+  expectedFrames: number | null
+  decodeRatio: number | null
+  durationRetentionRatio: number | null
+  errorCount: number
+  warnings: string[]
 }
 
 export interface RepairResult {
@@ -72,18 +126,37 @@ export interface RepairResult {
   reason?: string
   warnings?: string[]
   logPath?: string
+  verification?: RepairVerification
+}
+
+export interface RepairHistoryEntry {
+  id: string
+  inputPath: string
+  outputPath?: string
+  startedAt: string
+  finishedAt: string
+  success: boolean
+  stage: RepairStage
+  method?: RepairResult['method']
+  reason?: string
+  warnings?: string[]
+  verification?: RepairVerification
 }
 
 export interface DesktopApi {
   selectInput(): Promise<string | null>
   selectReference(): Promise<string | null>
   getDroppedFilePath(file: File): string
+  preflightRepair(request: PreflightRepairRequest): Promise<RepairPreflight>
   startRepair(request: StartRepairRequest): Promise<RepairResult>
   cancelRepair(): Promise<boolean>
   openOutput(path: string): Promise<void>
   openOutputFolder(path: string): Promise<void>
   exportLog(logPath?: string): Promise<string | null>
   copyText(text: string): Promise<void>
+  listRepairHistory(): Promise<RepairHistoryEntry[]>
+  removeRepairHistoryEntry(id: string): Promise<boolean>
+  clearRepairHistory(): Promise<void>
   onProgress(callback: (progress: RepairProgress) => void): void
   removeProgressListeners(): void
 }

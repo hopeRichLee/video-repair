@@ -35,6 +35,18 @@ async function generateIphone6ProfileVideo(target: string, seconds: number): Pro
   ])
 }
 
+async function generateHevcProfileVideo(target: string, seconds: number): Promise<void> {
+  await execFileAsync(ffmpeg, [
+    '-y', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30',
+    '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+    '-t', String(seconds), '-shortest', '-map', '0:v:0', '-map', '1:a:0',
+    '-c:v', 'libx265', '-preset', 'ultrafast', '-tag:v', 'hvc1', '-level:v', '4.0',
+    '-x265-params', 'log-level=error', '-b:v', '12M', '-pix_fmt', 'yuv420p', '-r', '30',
+    '-g', '60', '-keyint_min', '30', '-sc_threshold', '0',
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2', target,
+  ])
+}
+
 function digest(buffer: Buffer): string {
   return createHash('sha256').update(buffer).digest('hex')
 }
@@ -46,6 +58,11 @@ integration('RepairEngine with real media tools', () => {
     await generateVideo(input, 1)
     const before = digest(await readFile(input))
     const engine = new RepairEngine({ ffmpeg, ffprobe, untrunc }, path.join(directory, 'logs'), () => undefined)
+
+    const preflight = await engine.preflight({ inputPath: input })
+    expect(preflight.canStart).toBe(true)
+    expect(preflight.recommendedStrategy).toBe('remux')
+    expect(preflight.diskSpace.sufficient).toBe(true)
 
     const result = await engine.start({ inputPath: input })
 
@@ -78,7 +95,7 @@ integration('RepairEngine with real media tools', () => {
     expect(digest(await readFile(damaged))).toBe(before)
   }, 60_000)
 
-  it('tries built-in iPhone 6 profiles when experimental recovery is requested', async () => {
+  it('recovers H.264 with a matching generic profile', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), '视频修复-'))
     const complete = path.join(directory, 'iPhone6-complete.mov')
     const damaged = path.join(directory, 'iPhone6-无参考.mov')
@@ -97,6 +114,58 @@ integration('RepairEngine with real media tools', () => {
     expect(result.warnings?.[0]).toContain('无参考实验恢复')
     expect(digest(await readFile(damaged))).toBe(before)
   }, 90_000)
+
+  it('recovers an HEVC recording with an exact generic profile hint', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), '视频修复-hevc-'))
+    const complete = path.join(directory, 'hevc-complete.mov')
+    const damaged = path.join(directory, 'hevc-无参考.mov')
+    await generateHevcProfileVideo(complete, 2)
+    const bytes = await readFile(complete)
+    const moovMarker = bytes.indexOf(Buffer.from('moov'))
+    expect(moovMarker).toBeGreaterThan(4)
+    await writeFile(damaged, bytes.subarray(0, moovMarker - 4))
+    const before = digest(await readFile(damaged))
+    const engine = new RepairEngine({ ffmpeg, ffprobe, untrunc }, path.join(directory, 'logs'), () => undefined)
+
+    const result = await engine.start({
+      inputPath: damaged,
+      experimentalRecovery: true,
+      recoveryHints: { codec: 'hevc', width: 1920, height: 1080, frameRate: 30 },
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.method).toBe('experimental-index')
+    expect(result.verification?.decodedFrames).toBeGreaterThan(0)
+    expect(digest(await readFile(damaged))).toBe(before)
+  }, 120_000)
+
+  it('cancels an experimental profile attempt without changing its source', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), '视频修复-cancel-'))
+    const complete = path.join(directory, 'cancel-complete.mp4')
+    const damaged = path.join(directory, 'cancel-damaged.mp4')
+    await generateIphone6ProfileVideo(complete, 2)
+    const bytes = await readFile(complete)
+    const moovMarker = bytes.indexOf(Buffer.from('moov'))
+    await writeFile(damaged, bytes.subarray(0, moovMarker - 4))
+    const before = digest(await readFile(damaged))
+    let engine: RepairEngine
+    let cancelled = false
+    engine = new RepairEngine({ ffmpeg, ffprobe, untrunc }, path.join(directory, 'logs'), (progress) => {
+      if (!cancelled && progress.recoveryAttempt) {
+        cancelled = true
+        void engine.cancel()
+      }
+    })
+
+    const result = await engine.start({
+      inputPath: damaged,
+      experimentalRecovery: true,
+      recoveryHints: { codec: 'h264', width: 3840, height: 2160, frameRate: 30 },
+    })
+
+    expect(result.stage).toBe('cancelled')
+    expect(digest(await readFile(damaged))).toBe(before)
+  }, 60_000)
 
   it('skips an unknown byte sequence and recovers video after the damaged area', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), '视频修复-'))

@@ -16,7 +16,17 @@ import {
   validateMediaPath,
 } from './media-utils.js'
 import { ProcessRunner } from './process-runner.js'
-import type { Diagnosis, RepairProgress, RepairResult, RepairStage, StartRepairRequest } from '../shared/types.js'
+import { RECOVERY_PROFILE_VERSION, selectRecoveryProfiles, type RecoveryProfile } from './recovery-profiles.js'
+import type {
+  Diagnosis,
+  PreflightRepairRequest,
+  RepairPreflight,
+  RepairProgress,
+  RepairResult,
+  RepairStage,
+  RepairVerification,
+  StartRepairRequest,
+} from '../shared/types.js'
 
 interface ProbeResult {
   data?: ProbeJson
@@ -33,22 +43,6 @@ interface VerificationResult {
   decodeRatio?: number | null
 }
 
-interface ExperimentalProfile {
-  id: string
-  label: string
-  width: number
-  height: number
-  frameRate: number
-  level: string
-  videoBitrate: string
-}
-
-const IPHONE_6_PROFILES: ExperimentalProfile[] = [
-  { id: 'iphone6-1080p30', label: 'iPhone 6 · 1080p 30fps', width: 1920, height: 1080, frameRate: 30, level: '4.0', videoBitrate: '17M' },
-  { id: 'iphone6-1080p60', label: 'iPhone 6 · 1080p 60fps', width: 1920, height: 1080, frameRate: 60, level: '4.2', videoBitrate: '26M' },
-  { id: 'iphone6-720p30', label: 'iPhone 6 · 720p 30fps', width: 1280, height: 720, frameRate: 30, level: '3.1', videoBitrate: '10M' },
-]
-
 export class RepairEngine {
   private readonly runner = new ProcessRunner()
   private active = false
@@ -61,12 +55,71 @@ export class RepairEngine {
   private lastOutputPath = ''
   private lastIndexRecoveryDetail = ''
   private recoveryWarnings: string[] = []
+  private currentRecoveryAttempt: RepairProgress['recoveryAttempt']
 
   constructor(
     private readonly binaries: BinaryPaths,
     private readonly logDirectory: string,
     private readonly sendProgress: (progress: RepairProgress) => void,
   ) {}
+
+  async preflight(request: PreflightRepairRequest): Promise<RepairPreflight> {
+    if (this.active) throw new Error('已有任务正在运行')
+    this.active = true
+    this.runner.reset()
+    try {
+      const inputPath = await validateMediaPath(request.inputPath)
+      const inputInfo = await stat(inputPath)
+      const inputProbe = await this.probe(inputPath, false)
+      const diagnosis = classifyDiagnosis(inputProbe.stderr, inputProbe.data)
+      const diskSpace = await this.getDiskSpace(inputPath)
+      let recommendedStrategy: RepairPreflight['recommendedStrategy'] = diagnosis.needsReference ? 'index-rebuild' : 'remux'
+      let strategyReason = diagnosis.needsReference
+        ? '视频索引缺失，需要匹配的正常视频重建容器结构'
+        : '先无损重建容器和时间轴，验证失败时再进行容错转码'
+      let canStart = diskSpace.sufficient && diagnosis.category !== 'no-media' && !diagnosis.needsReference
+      let reference: RepairPreflight['reference']
+
+      if (diagnosis.category === 'no-media') {
+        recommendedStrategy = 'unavailable'
+        strategyReason = '没有识别到视频轨道，通用修复无法安全继续'
+      }
+
+      if (request.referencePath) {
+        const referencePath = await validateMediaPath(request.referencePath)
+        if (path.resolve(referencePath).toLowerCase() === path.resolve(inputPath).toLowerCase()) {
+          throw new Error('参考视频不能与损坏视频相同')
+        }
+        const referenceProbe = await this.probe(referencePath, false)
+        const referenceDiagnosis = classifyDiagnosis(referenceProbe.stderr, referenceProbe.data)
+        const compatibility = areReferencesCompatible(inputProbe.data, referenceProbe.data ?? {})
+        reference = {
+          path: referencePath,
+          compatible: compatibility.compatible,
+          reason: compatibility.reason,
+          diagnosis: referenceDiagnosis,
+        }
+        canStart = diskSpace.sufficient && diagnosis.category !== 'no-media'
+          && (!diagnosis.needsReference || compatibility.compatible)
+      }
+
+      if (!diskSpace.sufficient) strategyReason = `${strategyReason}；当前磁盘空间不足`
+      return {
+        inputPath,
+        fileName: path.basename(inputPath),
+        fileSizeBytes: inputInfo.size,
+        modifiedAt: inputInfo.mtime.toISOString(),
+        diagnosis,
+        diskSpace,
+        recommendedStrategy,
+        strategyReason,
+        canStart,
+        reference,
+      }
+    } finally {
+      this.active = false
+    }
+  }
 
   async start(request: StartRepairRequest): Promise<RepairResult> {
     if (this.active) throw new Error('已有修复任务正在运行')
@@ -98,7 +151,7 @@ export class RepairEngine {
         }
         if (request.experimentalRecovery) {
           if (!this.binaries.untrunc) throw new Error('索引恢复引擎未安装，请重新安装应用')
-          const repaired = await this.recoverWithoutReference(inputPath, diagnosis)
+          const repaired = await this.recoverWithoutReference(inputPath, diagnosis, request)
           if (repaired) return repaired
           throw new Error(this.lastIndexRecoveryDetail || '无参考实验恢复未找到可可靠解码的结果')
         }
@@ -183,10 +236,10 @@ export class RepairEngine {
     return Boolean(this.lastOutputPath) && path.resolve(filePath).toLowerCase() === path.resolve(this.lastOutputPath).toLowerCase()
   }
 
-  private async probe(filePath: string): Promise<ProbeResult> {
+  private async probe(filePath: string, captureErrors = true): Promise<ProbeResult> {
     const result = await this.runner.run(this.binaries.ffprobe, [
       '-v', 'error', '-show_format', '-show_streams', '-print_format', 'json', filePath,
-    ], { onStderr: (chunk) => this.captureErrors(chunk) })
+    ], { onStderr: captureErrors ? (chunk) => this.captureErrors(chunk) : undefined })
     let data: ProbeJson | undefined
     try {
       data = JSON.parse(result.stdout) as ProbeJson
@@ -212,37 +265,32 @@ export class RepairEngine {
     })
   }
 
-  private async recoverWithoutReference(inputPath: string, diagnosis: Diagnosis): Promise<RepairResult | null> {
-    const profileDirectory = path.join(path.dirname(inputPath), `.video-repair-profiles-${randomUUID()}`)
-    await mkdir(profileDirectory)
-    this.temporaryPaths.add(profileDirectory)
+  private async recoverWithoutReference(
+    inputPath: string,
+    diagnosis: Diagnosis,
+    request: StartRepairRequest,
+  ): Promise<RepairResult | null> {
+    const profiles = selectRecoveryProfiles(request.recoveryHints)
+    if (!profiles.length) throw new Error('没有符合所选条件的无参考恢复参数')
     const failures: string[] = []
 
-    this.writeLog('启动无参考实验恢复：依次尝试 iPhone 6 常见 H.264 录像参数')
-    for (const [index, profile] of IPHONE_6_PROFILES.entries()) {
-      const referencePath = path.join(profileDirectory, `${profile.id}.mov`)
-      const message = `正在尝试 ${profile.label}（${index + 1}/${IPHONE_6_PROFILES.length}）…`
+    this.writeLog(`启动无参考实验恢复：共 ${profiles.length} 组通用录像参数`)
+    for (const [index, profile] of profiles.entries()) {
+      this.currentRecoveryAttempt = { index: index + 1, total: profiles.length, label: profile.label }
+      const message = `正在尝试 ${profile.label}（${index + 1}/${profiles.length}）…`
       this.emit('rebuilding-index', message, null)
       this.writeLog(message)
 
-      const generated = await this.runner.run(this.binaries.ffmpeg, [
-        '-y',
-        '-f', 'lavfi', '-i', `testsrc2=size=${profile.width}x${profile.height}:rate=${profile.frameRate}`,
-        '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
-        '-t', '1.5', '-shortest',
-        '-map', '0:v:0', '-map', '1:a:0',
-        '-c:v', 'libx264', '-preset', 'veryfast', '-profile:v', 'high', '-level:v', profile.level,
-        '-b:v', profile.videoBitrate, '-pix_fmt', 'yuv420p', '-r', String(profile.frameRate),
-        '-g', String(profile.frameRate * 2), '-keyint_min', String(profile.frameRate), '-sc_threshold', '0',
-        '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
-        '-movflags', '+faststart', referencePath,
-      ], { onStderr: (chunk) => this.writeLog(chunk.trimEnd()) })
-      if (generated.code !== 0) {
-        failures.push(`${profile.label}：内部参数样本生成失败`)
+      let referencePath: string
+      try {
+        referencePath = await this.getProfileReference(profile)
+      } catch (error) {
+        if (this.runner.isCancelled() || (error instanceof Error && error.message === 'TASK_CANCELLED')) throw error
+        failures.push(`${profile.label}：${error instanceof Error ? error.message : '内部参数样本生成失败'}`)
         continue
       }
 
-      const referenceProbe = await this.probe(referencePath)
+      const referenceProbe = await this.probe(referencePath, false)
       if (!referenceProbe.data) {
         failures.push(`${profile.label}：内部参数样本无法读取`)
         continue
@@ -275,8 +323,51 @@ export class RepairEngine {
       .filter((match): match is RegExpMatchArray => Boolean(match))
       .sort((left, right) => Number(right[3]) - Number(left[3]))[0]
     const bestDetail = bestDecode ? `最佳结果仅解出 ${bestDecode[1]}/${bestDecode[2]} 帧（${bestDecode[3]}%）。` : ''
-    this.lastIndexRecoveryDetail = `已尝试 ${IPHONE_6_PROFILES.length} 组 iPhone 6 参数，但都未达到 50% 解码帧门槛。${bestDetail}媒体数据可能存在，但缺少正确的 SPS/PPS；仍需匹配样片或线上修复结果`
+    this.currentRecoveryAttempt = undefined
+    this.lastIndexRecoveryDetail = `已尝试 ${profiles.length} 组通用参数，但都未达到 50% 解码帧门槛。${bestDetail}媒体数据可能存在，但仍缺少匹配的编码参数；建议选择同设备、同录制设置的正常视频`
     return null
+  }
+
+  private async getProfileReference(profile: RecoveryProfile): Promise<string> {
+    const profileDirectory = path.join(path.dirname(this.logDirectory), `recovery-profiles-v${RECOVERY_PROFILE_VERSION}`)
+    const referencePath = path.join(profileDirectory, `${profile.id}.mp4`)
+    await mkdir(profileDirectory, { recursive: true })
+
+    try {
+      const info = await stat(referencePath)
+      if (info.size > 0) {
+        const cached = await this.probe(referencePath, false)
+        const cachedVideo = cached.data?.streams?.find((stream) => stream.codec_type === 'video')
+        if (cachedVideo?.codec_name === profile.codec && cachedVideo.width === profile.width && cachedVideo.height === profile.height) {
+          this.writeLog(`使用缓存参数样本：${profile.label}`)
+          return referencePath
+        }
+      }
+    } catch {
+      // Generate the profile below.
+    }
+
+    await rm(referencePath, { force: true })
+    const videoArgs = profile.codec === 'hevc'
+      ? ['-c:v', 'libx265', '-preset', 'ultrafast', '-tag:v', 'hvc1', '-level:v', profile.level, '-x265-params', 'log-level=error']
+      : ['-c:v', 'libx264', '-preset', 'veryfast', '-profile:v', 'high', '-level:v', profile.level]
+    const generated = await this.runner.run(this.binaries.ffmpeg, [
+      '-y',
+      '-f', 'lavfi', '-i', `testsrc2=size=${profile.width}x${profile.height}:rate=${profile.frameRate}`,
+      '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+      '-t', '1.5', '-shortest',
+      '-map', '0:v:0', '-map', '1:a:0',
+      ...videoArgs,
+      '-b:v', profile.videoBitrate, '-pix_fmt', 'yuv420p', '-r', String(profile.frameRate),
+      '-g', String(profile.frameRate * 2), '-keyint_min', String(profile.frameRate), '-sc_threshold', '0',
+      '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
+      '-movflags', '+faststart', referencePath,
+    ], { onStderr: (chunk) => this.writeLog(chunk.trimEnd()) })
+    if (generated.code !== 0) {
+      await rm(referencePath, { force: true })
+      throw new Error('内部参数样本生成失败')
+    }
+    return referencePath
   }
 
   private async rebuildIndex(inputPath: string, referencePath: string, referenceProbe?: ProbeJson): Promise<string> {
@@ -399,8 +490,8 @@ export class RepairEngine {
   private async finishCandidate(candidate: string, diagnosis: Diagnosis, method: RepairResult['method']): Promise<RepairResult | null> {
     this.emit('verifying', '正在完整验证修复结果…', 99)
     let finalCandidate = candidate
+    let acceptedVerification: VerificationResult | undefined
     if (method === 'index-rebuild' || method === 'experimental-index') {
-      let acceptedVerification: VerificationResult | undefined
       const normalized = this.createTemporaryOutput(candidate, 'normalized')
       const normalizedResult = await this.runFfmpeg('remuxing', diagnosis.durationSeconds, [
         '-y', '-fflags', '+genpts+discardcorrupt', '-err_detect', 'ignore_err', '-i', candidate,
@@ -438,6 +529,7 @@ export class RepairEngine {
         this.writeLog(`验证未通过：${verification.reason ?? '未知错误'}`)
         return null
       }
+      acceptedVerification = verification
     }
 
     const actualOutput = await uniqueOutputPath(this.currentInputForOutput ?? candidate)
@@ -446,6 +538,24 @@ export class RepairEngine {
     this.temporaryPaths.delete(finalCandidate)
     const finalProbe = await this.probe(actualOutput)
     const finalDiagnosis = classifyDiagnosis(finalProbe.stderr, finalProbe.data)
+    const outputInfo = await stat(actualOutput)
+    const warnings = [...this.recoveryWarnings]
+    if (this.errorCount > 0 && !warnings.some((warning) => warning.includes('损坏'))) {
+      warnings.push(`处理过程中跳过 ${this.errorCount} 处媒体错误，请完整检查输出内容`)
+    }
+    const verification: RepairVerification = {
+      status: warnings.length > 0 || this.errorCount > 0 ? 'warning' : 'passed',
+      outputSizeBytes: outputInfo.size,
+      durationSeconds: finalDiagnosis.durationSeconds,
+      decodedFrames: acceptedVerification?.decodedFrames ?? 0,
+      expectedFrames: acceptedVerification?.expectedFrames ?? null,
+      decodeRatio: acceptedVerification?.decodeRatio ?? null,
+      durationRetentionRatio: diagnosis.durationSeconds > 0
+        ? Math.min(1, finalDiagnosis.durationSeconds / diagnosis.durationSeconds)
+        : null,
+      errorCount: this.errorCount,
+      warnings,
+    }
     this.emit('success', '修复完成，结果已通过解码验证', 100)
     return {
       success: true,
@@ -456,8 +566,9 @@ export class RepairEngine {
       streams: finalDiagnosis.streams,
       skippedErrors: this.errorCount,
       diagnosis,
-      warnings: this.recoveryWarnings,
+      warnings,
       logPath: this.logPath,
+      verification,
     }
   }
 
@@ -507,11 +618,16 @@ export class RepairEngine {
   }
 
   private async ensureDiskSpace(inputPath: string): Promise<void> {
+    const diskSpace = await this.getDiskSpace(inputPath)
+    if (!diskSpace.sufficient) throw new Error(`磁盘空间不足，至少需要约 ${this.formatBytes(diskSpace.requiredBytes)} 可用空间`)
+  }
+
+  private async getDiskSpace(inputPath: string): Promise<RepairPreflight['diskSpace']> {
     const file = await stat(inputPath)
     const disk = await statfs(path.dirname(inputPath))
     const available = Number(disk.bavail) * Number(disk.bsize)
     const required = Math.max(512 * 1024 * 1024, Math.ceil(file.size * 1.15))
-    if (available < required) throw new Error(`磁盘空间不足，至少需要约 ${this.formatBytes(required)} 可用空间`)
+    return { availableBytes: available, requiredBytes: required, sufficient: available >= required }
   }
 
   private formatBytes(bytes: number): string {
@@ -530,6 +646,7 @@ export class RepairEngine {
       message,
       logLine: extra.logLine,
       diagnosis: extra.diagnosis,
+      recoveryAttempt: extra.recoveryAttempt ?? this.currentRecoveryAttempt,
     })
   }
 
@@ -547,7 +664,7 @@ export class RepairEngine {
   }
 
   private writeLog(message: string): void {
-    if (!message) return
+    if (!message || !this.logPath) return
     appendFileSync(this.logPath, `[${new Date().toISOString()}] ${message}\n`, 'utf8')
   }
 
@@ -568,5 +685,6 @@ export class RepairEngine {
   private async cleanup(): Promise<void> {
     for (const target of [...this.temporaryPaths]) await this.safeRemove(target)
     this.currentInputForOutput = null
+    this.currentRecoveryAttempt = undefined
   }
 }
