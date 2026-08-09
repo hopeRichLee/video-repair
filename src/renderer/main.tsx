@@ -1,6 +1,6 @@
 import React, { Component, type ErrorInfo, type ReactNode } from 'react'
 import ReactDOM from 'react-dom/client'
-import { App } from './App'
+import { App, BrandMark } from './App'
 import './styles.css'
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -21,7 +21,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean
 }
 
 function FatalState({ message }: { message: string }) {
-  return <main className="fatal-state"><div className="brand-mark">!</div><h1>视频修复助手无法启动</h1><p>{message}</p></main>
+  return <main className="fatal-state"><BrandMark /><h1>视频修复助手无法启动</h1><p>{message}</p></main>
 }
 
 const root = ReactDOM.createRoot(document.getElementById('root')!)

@@ -35,29 +35,53 @@ function Fill-RoundedRectangle($graphics, $brush, [single]$x, [single]$y, [singl
 }
 
 function Draw-RepairGlyph($graphics, [single]$x, [single]$y, [single]$size, $color, $accentColor) {
-  $stroke = [Math]::Max(2, $size * 0.065)
+  $stroke = [Math]::Max(2, $size * 0.055)
   $pen = [System.Drawing.Pen]::new($color, $stroke)
   $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
   $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+  $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
 
-  $videoX = $x + $size * 0.13
-  $videoY = $y + $size * 0.18
-  $videoW = $size * 0.57
-  $videoH = $size * 0.46
-  $graphics.DrawRectangle($pen, $videoX, $videoY, $videoW, $videoH)
-  $graphics.DrawLine($pen, $videoX + $size * 0.12, $videoY + $size * 0.11, $videoX + $size * 0.12, $videoY + $videoH - $size * 0.11)
+  # A film frame keeps the subject recognizable at small Windows icon sizes.
+  $frameX = $x + $size * 0.12
+  $frameY = $y + $size * 0.24
+  $frameW = $size * 0.66
+  $frameH = $size * 0.52
+  $framePath = New-RoundedPath $frameX $frameY $frameW $frameH ($size * 0.055)
+  $graphics.DrawPath($pen, $framePath)
 
-  $wrenchPen = [System.Drawing.Pen]::new($color, $stroke * 1.15)
-  $wrenchPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-  $wrenchPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-  $graphics.DrawLine($wrenchPen, $x + $size * 0.47, $y + $size * 0.77, $x + $size * 0.79, $y + $size * 0.42)
-  $graphics.DrawLine($wrenchPen, $x + $size * 0.75, $y + $size * 0.37, $x + $size * 0.87, $y + $size * 0.31)
-  $graphics.DrawLine($wrenchPen, $x + $size * 0.79, $y + $size * 0.42, $x + $size * 0.89, $y + $size * 0.47)
+  $separatorX = $frameX + $size * 0.13
+  $graphics.DrawLine($pen, $separatorX, $frameY, $separatorX, $frameY + $frameH)
+
+  $playPath = [System.Drawing.Drawing2D.GraphicsPath]::new()
+  $playPath.AddPolygon([System.Drawing.PointF[]]@(
+    [System.Drawing.PointF]::new($x + $size * 0.40, $y + $size * 0.38),
+    [System.Drawing.PointF]::new($x + $size * 0.40, $y + $size * 0.63),
+    [System.Drawing.PointF]::new($x + $size * 0.61, $y + $size * 0.505)
+  ))
+  $glyphBrush = [System.Drawing.SolidBrush]::new($color)
+  $graphics.FillPath($glyphBrush, $playPath)
+
+  # The asymmetric four-point spark communicates restoration without a generic tool glyph.
   $accentBrush = [System.Drawing.SolidBrush]::new($accentColor)
-  $graphics.FillEllipse($accentBrush, $x + $size * 0.75, $y + $size * 0.10, $size * 0.14, $size * 0.14)
+  $sparkPath = [System.Drawing.Drawing2D.GraphicsPath]::new()
+  $sparkPath.AddPolygon([System.Drawing.PointF[]]@(
+    [System.Drawing.PointF]::new($x + $size * 0.82, $y + $size * 0.08),
+    [System.Drawing.PointF]::new($x + $size * 0.86, $y + $size * 0.19),
+    [System.Drawing.PointF]::new($x + $size * 0.96, $y + $size * 0.23),
+    [System.Drawing.PointF]::new($x + $size * 0.86, $y + $size * 0.27),
+    [System.Drawing.PointF]::new($x + $size * 0.82, $y + $size * 0.38),
+    [System.Drawing.PointF]::new($x + $size * 0.78, $y + $size * 0.27),
+    [System.Drawing.PointF]::new($x + $size * 0.68, $y + $size * 0.23),
+    [System.Drawing.PointF]::new($x + $size * 0.78, $y + $size * 0.19)
+  ))
+  $graphics.FillPath($accentBrush, $sparkPath)
+  $graphics.FillEllipse($accentBrush, $x + $size * 0.83, $y + $size * 0.42, $size * 0.075, $size * 0.075)
 
+  $sparkPath.Dispose()
   $accentBrush.Dispose()
-  $wrenchPen.Dispose()
+  $glyphBrush.Dispose()
+  $playPath.Dispose()
+  $framePath.Dispose()
   $pen.Dispose()
 }
 

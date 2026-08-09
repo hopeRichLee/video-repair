@@ -18,7 +18,9 @@ button:disabled { cursor: not-allowed; }
   height: 68px; padding: 0 30px; display: flex; align-items: center; gap: 12px;
   background: #fff; border-bottom: 1px solid #d8e0e2; -webkit-app-region: drag;
 }
-.brand-mark { width: 34px; height: 34px; display: grid; place-items: center; color: #fff; background: #0c7469; border-radius: 7px; }
+.brand-mark { position: relative; width: 34px; height: 34px; display: grid; place-items: center; color: #fff; background: #0c7469; border-radius: 7px; overflow: hidden; }
+.brand-film { transform: translate(-1px, 1px); }
+.brand-spark { position: absolute; top: 3px; right: 3px; color: #f2b84d; fill: #f2b84d; filter: drop-shadow(0 0 1px #0c7469); }
 .brand-copy { display: flex; align-items: baseline; gap: 9px; }
 .brand-copy h1 { margin: 0; font-size: 17px; font-weight: 750; }
 .brand-copy span { color: #748187; font-size: 11px; }

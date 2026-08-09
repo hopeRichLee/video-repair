@@ -18,6 +18,8 @@ async function isKnownOutput(filePath: string): Promise<boolean> {
 }
 
 function createWindow(): void {
+  const windowIcon = path.join(app.getAppPath(), 'build', 'icon.ico')
+
   mainWindow = new BrowserWindow({
     width: 1120,
     height: 760,
@@ -26,6 +28,7 @@ function createWindow(): void {
     show: false,
     backgroundColor: '#f3f5f6',
     title: '视频修复助手',
+    icon: windowIcon,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(currentDirectory, 'preload.cjs'),

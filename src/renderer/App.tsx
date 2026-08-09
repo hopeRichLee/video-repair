@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check, ChevronDown, ChevronRight, CircleAlert, Clipboard, Clock3, FileSearch,
-  FileVideo2, FolderOpen, Gauge, HardDrive, History, LoaderCircle, Play, RotateCcw,
-  Save, ShieldCheck, Square, Trash2, Upload, Wrench, X,
+  FileVideo2, Film, FolderOpen, Gauge, HardDrive, History, LoaderCircle, Play, RotateCcw,
+  Save, ShieldCheck, Sparkles, Square, Trash2, Upload, Wrench, X,
 } from 'lucide-react'
 import type {
   Diagnosis, RecoveryHints, RepairHistoryEntry, RepairPreflight, RepairProgress,
@@ -73,6 +73,15 @@ function diagnosisText(diagnosis?: Diagnosis): string {
     return `${stream.type === 'video' ? '视频' : stream.type === 'audio' ? '音频' : '其他'}：${stream.codec}${dimensions}`
   })
   return [diagnosis.summary, `容器：${diagnosis.format}`, `时长：${formatDuration(diagnosis.durationSeconds)}`, ...streams].join('\n')
+}
+
+export function BrandMark() {
+  return (
+    <div className="brand-mark" aria-hidden="true">
+      <Film className="brand-film" size={20} strokeWidth={2.2} />
+      <Sparkles className="brand-spark" size={11} strokeWidth={2.5} />
+    </div>
+  )
 }
 
 export function App() {
@@ -233,7 +242,7 @@ export function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand-mark"><Wrench size={19} strokeWidth={2.2} /></div>
+        <BrandMark />
         <div className="brand-copy"><h1>视频修复助手</h1><span>本地离线处理</span></div>
         <div className="topbar-actions">
           <div className="privacy-badge"><ShieldCheck size={15} /> 原文件保持不变</div>
